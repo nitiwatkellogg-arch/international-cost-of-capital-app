@@ -56,3 +56,13 @@ When the target country is United States, with no foreign spread override, both 
 Website HTML structures can change, and the OECD narrative page may not expose a machine-readable country table. The app shows fetch failures rather than inventing live values. Where live values cannot be verified, users must confirm/override the explicitly labeled classroom reference values. The class tax reference is dated 2026; the class yield reference is dated November 6, 2026. The initial USD BBB 1.5pp value is the **class example**, not a claim of the latest observed spread.
 
 The government yield is a proxy for the risk-free rate and may contain sovereign credit risk. The model does not add a separate country equity risk premium, consistent with the class example. This app is educational and not investment advice.
+
+## Data-source troubleshooting (November 2026 update)
+
+- **OECD 403:** The app now calls the official OECD report webpage specified in the assignment (may block automated requests with HTTP 403).
+- **Trading Economics / html5lib:** `html5lib` is now included in `requirements.txt`, and HTML table parsing explicitly uses `lxml`. Trading Economics can still change its HTML or block automated requests; if so, the app labels the source unavailable and allows manual values.
+- Reboot/redeploy the Streamlit app after replacing `app.py` and `requirements.txt` in GitHub.
+
+
+### OECD Excel tax source
+The repository includes `oecd_corporate_tax_2024.xlsx`, the user-supplied OECD Corporate Tax Statistics 2024 Figure 2.1 workbook. Tax observations are **2024**, not live 2026 rates. `Refresh all source data` rereads the bundled file; replace it with a newer OECD workbook if required. The Trading Economics bond-yield fetch is unchanged and may still need manual inputs when blocked.
