@@ -94,3 +94,190 @@ def get_te_yields():
             if len(cells) < 2 or not re.search(r"\b(10Y|10-Year|10 Year)\b", cells[0], re.I):
                 continue
             diagnostics["10-year candidate rows"] += 1
+            country = normal_country(re.sub(r"\s*(10Y|10-Year|10 Year).*$", "", cells[0], flags=re.I))
+            value = parse_num(cells[1])
+            if country and value is not None and -5 < value < 100:
+                result[country] = value
+        if not result:
+            diagnostics["Error"] = "No accessible 10-year yield rows in the HTML response"
+    except Exception as exc:
+        diagnostics["Error"] = f"{type(exc).__name__}: {exc}"
+    return result, diagnostics, html
+
+def get_oecd_taxes():
+    """Read the user-provided OECD 2024 Figure 2.1 Excel workbook (not live data)."""
+    path = Path(__file__).resolve().parent / "oecd_corporate_tax_2024.xlsx"
+    if not path.exists():
+        raise FileNotFoundError("Upload oecd_corporate_tax_2024.xlsx to the GitHub repository root")
+    raw = pd.read_excel(path, sheet_name="g2_1", header=None)
+    result = {}
+    for code, value in raw.iloc[:, :2].itertuples(index=False, name=None):
+        if not isinstance(code, str) or not re.fullmatch(r"[A-Z]{3}", code):
+            continue
+        if not isinstance(value, (int, float, np.number)) or pd.isna(value):
+            continue
+        try:
+            country = pycountry.countries.get(alpha_3=code)
+            if country is None:
+                continue
+            name = normal_country(country.name)
+            name = {"Korea, Republic of": "South Korea", "Viet Nam": "Vietnam",
+                    "Türkiye": "Turkey", "Czechia": "Czech Republic",
+                    "United Arab Emirates": "United Arab Emirates"}.get(name, name)
+            result[name] = float(value) * 100  # OECD workbook stores rates as fractions
+        except (TypeError, ValueError):
+            continue
+    if not result:
+        raise ValueError("No ISO3 corporate tax rates found in the supplied OECD workbook")
+    return result
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_data():
+    output, errors, times = {}, {}, {}
+    for key, fn in [("betas", get_betas), ("spread", get_spread), ("taxes", get_oecd_taxes)]:
+        try:
+            output[key] = fn()
+            times[key] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        except Exception as exc:
+            errors[key] = str(exc)
+    yields, diagnostics, html = get_te_yields()
+    if yields:
+        output["yields"] = yields
+        times["yields"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    else:
+        errors["yields"] = diagnostics["Error"] or "No accessible yields"
+    return output, errors, times, diagnostics, html
+
+def calculate(beta_u, tax, debt, erp, rf_us, rf_foreign, spread_us, spread_foreign=None):
+    """All inputs except beta_u and debt are in percentage points."""
+    t=tax/100; d=debt; premium=erp/100; us=rf_us/100; foreign=rf_foreign/100; s=spread_us/100
+    if not 0<=d<1:raise ValueError('Debt share must be below 100%')
+    factor=(1+foreign)/(1+us)
+    beta_e=beta_u*(1+(1-t)*d/(1-d))
+    eq_us=us+beta_e*premium
+    debt_us=us+s
+    eq_foreign=(1+eq_us)*factor-1
+    auto_spread=s*factor
+    spread_f=auto_spread if spread_foreign is None else spread_foreign/100
+    debt_foreign=foreign+spread_f
+    wacc_us=(1-d)*eq_us+d*debt_us*(1-t)
+    wacc_foreign=(1-d)*eq_foreign+d*debt_foreign*(1-t)
+    return dict(beta_e=beta_e,eq_us=100*eq_us,eq_foreign=100*eq_foreign,debt_us=100*debt_us,debt_foreign=100*debt_foreign,wacc_us=100*wacc_us,wacc_foreign=100*wacc_foreign,auto_spread=100*auto_spread,spread_foreign=100*spread_f,after_us=100*debt_us*(1-t),after_foreign=100*debt_foreign*(1-t),factor=factor)
+
+st.title('🌍 International Cost of Capital')
+st.caption('Compare USD and local-currency cost of equity, debt, and WACC | Classroom valuation model')
+if st.button('🔄 Refresh all source data'):
+    load_data.clear();st.rerun()
+with st.spinner('Retrieving public source data…'):
+    data,errors,times,te_diagnostics,te_html=load_data()
+st.info('OECD statutory tax rates: uploaded OECD Corporate Tax Statistics 2024, Figure 2.1 (2024 observations). The refresh button rereads this bundled workbook; it does not download new OECD data. For newer rates, replace the workbook with an updated OECD file in the same layout.')
+for k,err in errors.items():st.warning(f'{k.title()} source unavailable: {err}. Enter a manual value or use the explicitly dated classroom reference where offered.')
+
+with st.expander("🔍 Trading Economics connection diagnostic", expanded="yields" in errors):
+    st.dataframe(pd.DataFrame([{"Check": k, "Result": str(v)} for k, v in te_diagnostics.items()]),
+                 hide_index=True, use_container_width=True)
+    if te_html:
+        st.download_button("⬇️ Download complete Trading Economics HTML",
+                           data=te_html.encode("utf-8"), file_name="trading_economics.html",
+                           mime="text/html")
+        st.caption("Download this file and upload it to ChatGPT for inspection. The HTML is from Trading Economics only.")
+    else:
+        st.warning("No HTML was received, so there is nothing to download.")
+
+industries=data.get('betas',pd.DataFrame({'Industry':['Software (System & Application)'],'Unlevered beta':[np.nan]}))
+industry_names=industries['Industry'].tolist()
+default_ind=next((i for i,n in enumerate(industry_names) if 'software' in n.lower() and ('system' in n.lower() or 'application' in n.lower())),0)
+country_set=set(CLASS_TAX_2026)|set(CLASS_YIELDS_NOV6)|set(data.get('yields',{}))|set(data.get('taxes',{}))
+country_names=['United States']+sorted(country_set-{'United States'})
+with st.sidebar:
+    st.header('Project settings')
+    industry=st.selectbox('Industry',industry_names,index=default_ind)
+    country=st.selectbox('Target country',country_names,index=0)
+    erp=st.slider('Equity risk premium (%)',0.0,15.0,6.5,0.1)
+    debt=st.slider('Target debt financing (%)',0,95,30,1)/100
+    tax_choice=st.radio('Project corporate tax rate', ['United States','Selected country'],horizontal=True)
+    st.caption('The chosen project tax rate applies to BOTH financing currencies.')
+    st.divider()
+    st.header('Manual overrides')
+    beta_auto=float(industries.loc[industries['Industry']==industry,'Unlevered beta'].iloc[0])
+    beta_manual=st.checkbox('Override unlevered beta', value=not np.isfinite(beta_auto))
+    beta=st.number_input('Unlevered beta',min_value=0.0,max_value=10.0,value=beta_auto if np.isfinite(beta_auto) else 1.0,step=0.01,disabled=not beta_manual)
+    if not beta_manual:beta=beta_auto
+    tax_country='United States' if tax_choice=='United States' else country
+    tax_live=data.get('taxes',{}).get(tax_country)
+    tax_ref=CLASS_TAX_2026.get(tax_country)
+    if tax_live is None:
+        st.info(f'OECD current tax for {tax_country} not verified. Classroom 2026 reference shown; confirm before using.')
+    tax_manual=st.checkbox('Override corporate tax rate',value=(tax_live is None))
+    tax_default=tax_live if tax_live is not None else (tax_ref if tax_ref is not None else 25.0)
+    tax=st.number_input('Corporate tax rate (%)',0.0,70.0,float(tax_default),0.1,disabled=not tax_manual)
+    if not tax_manual:tax=tax_default
+    spread_result=data.get('spread')
+    spread_live=spread_result[0] if spread_result else None
+    spread_manual=st.checkbox('Override USD BBB spread',value=spread_live is None)
+    spread_us=st.number_input('USD BBB spread (percentage points)',0.0,20.0,float(spread_live if spread_live is not None else 1.5),0.05,disabled=not spread_manual)
+    if not spread_manual:spread_us=spread_live
+    yields=data.get('yields',{})
+    def yield_input(label,name):
+        live=yields.get(name)
+        reference=CLASS_YIELDS_NOV6.get(name)
+        if live is None:st.info(f'{name} live yield unavailable; reference dated Nov 6, 2026 where available.')
+        override=st.checkbox(f'Override {label} 10-year yield',value=live is None,key=f'override_{label}')
+        initial=live if live is not None else (reference if reference is not None else 4.0)
+        val=st.number_input(f'{label} 10-year yield (%)',-5.0,100.0,float(initial),0.05,disabled=not override,key=f'yield_{label}')
+        return val if override else live
+    rf_us=yield_input('USD','United States')
+    rf_foreign=yield_input('Local',country) if country!='United States' else rf_us
+    foreign_override=st.checkbox('Override local-currency BBB spread',value=False)
+    manual_foreign=st.number_input('Local BBB spread (percentage points)',0.0,30.0,float(spread_us),0.05,disabled=not foreign_override)
+
+if not np.isfinite(beta):st.error('Industry beta unavailable: enable its manual override.');st.stop()
+res=calculate(beta,tax,debt,erp,rf_us,rf_foreign,spread_us,manual_foreign if foreign_override else None)
+if country=='United States' and foreign_override:st.info('For a USD-to-USD comparison, disable the local spread override to keep both columns identical.')
+st.subheader(f'Financing comparison · United States vs. {country}')
+left,right=st.columns(2)
+with left:
+    st.markdown('### 🇺🇸 USD financing')
+    st.metric('WACC',f"{res['wacc_us']:.2f}%")
+    st.metric('Cost of equity',f"{res['eq_us']:.2f}%")
+    st.metric('Pretax cost of debt',f"{res['debt_us']:.2f}%")
+with right:
+    st.markdown(f'### {country} · local currency')
+    st.metric('WACC',f"{res['wacc_foreign']:.2f}%")
+    st.metric('Cost of equity',f"{res['eq_foreign']:.2f}%")
+    st.metric('Pretax cost of debt',f"{res['debt_foreign']:.2f}%")
+rows=[('Government 10-year yield',rf_us,rf_foreign),('Cost of equity',res['eq_us'],res['eq_foreign']),('Pretax cost of debt',res['debt_us'],res['debt_foreign']),('After-tax cost of debt',res['after_us'],res['after_foreign']),('WACC',res['wacc_us'],res['wacc_foreign'])]
+comparison=pd.DataFrame(rows,columns=['Metric','USD (%)',f'{country} (%)'])
+st.dataframe(comparison.style.format({'USD (%)':'{:.4f}',f'{country} (%)':'{:.4f}'}),hide_index=True,use_container_width=True)
+st.caption(f"Unlevered beta {beta:.4f} → relevered beta {res['beta_e']:.4f}; project tax {tax:.2f}%; ERP {erp:.2f}%; debt {debt:.0%}; USD BBB spread {spread_us:.4f} pp; local BBB spread {res['spread_foreign']:.4f} pp ({'manual' if foreign_override else 'automatic'}).")
+with st.expander('Calculation methodology and assumptions',expanded=True):
+    st.markdown(r'''**Relevered equity beta:** $\beta_E=\beta_U[1+(1-\tau)d/(1-d)]$  
+**USD equity:** $R_{e,USD}=R_{f,USD}+\beta_E\,ERP$  
+**USD debt:** $R_{d,USD}=R_{f,USD}+s_{USD}$  
+**Currency conversion:** $1+R_{e,local}=(1+R_{e,USD})(1+R_{f,local})/(1+R_{f,USD})$  
+**Automatic local BBB spread:** $s_{local}=s_{USD}(1+R_{f,local})/(1+R_{f,USD})$  
+**Local debt:** $R_{d,local}=R_{f,local}+s_{local}$ (unless manually overridden)  
+**Both WACCs:** $WACC=(1-d)R_e+dR_d(1-\tau)$''')
+    st.write('10-year government yields are proxies for currency-specific risk-free rates, not necessarily default-free yields. The model assumes zero debt beta, fully usable interest tax shields, a common project tax rate, and no separate country equity risk premium. The foreign BBB spread can be manually set, breaking exact currency-conversion consistency for debt and WACC.')
+    st.write('Compare each WACC only against cash flows denominated in its respective currency. Rates are nominal annual percentages.')
+
+st.subheader('All-industry comparison')
+all_rows=[]
+for _,r in industries.iterrows():
+    b=r['Unlevered beta']
+    if pd.isna(b):continue
+    z=calculate(float(b),tax,debt,erp,rf_us,rf_foreign,spread_us,manual_foreign if foreign_override else None)
+    all_rows.append({'Industry':r['Industry'],'Unlevered beta':b,'Relevered beta':z['beta_e'],'USD equity (%)':z['eq_us'],'Local equity (%)':z['eq_foreign'],'USD debt (%)':z['debt_us'],'Local debt (%)':z['debt_foreign'],'USD WACC (%)':z['wacc_us'],'Local WACC (%)':z['wacc_foreign']})
+all_df=pd.DataFrame(all_rows)
+if not all_df.empty:
+    st.dataframe(all_df,use_container_width=True,hide_index=True)
+    st.download_button('⬇️ Download all industries (CSV)',all_df.to_csv(index=False).encode(),'all_industry_cost_of_capital.csv','text/csv')
+st.download_button('⬇️ Download selected project (CSV)',comparison.to_csv(index=False).encode(),'selected_project_cost_of_capital.csv','text/csv')
+
+st.subheader('Source transparency')
+source_rows=[]
+for key,source in [('betas',BETA_URL),('spread',SPREAD_URL),('taxes','OECD Corporate Tax Statistics 2024 — bundled Excel, Figure 2.1'),('yields',TE_URL)]:
+    source_rows.append({'Dataset':key,'Source':source,'Retrieval (UTC)':times.get(key,'Unavailable'),'Status':'Fetched / parsed' if key in data else 'Unavailable — manual/reference required'})
+st.dataframe(pd.DataFrame(source_rows),hide_index=True,use_container_width=True)
+st.caption('Tax source observation year: 2024 (bundled OECD Excel). Retrieval time is not the source observation date. Inspect the source for its published dataset date. Reference tax figures are from professor slides (OECD 2026); reference yields are from slides dated Nov 6, 2026. These references are not represented as live fetched data.')
+if spread_result:st.caption('BBB parser note: '+spread_result[1])
