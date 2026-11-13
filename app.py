@@ -8,6 +8,7 @@ import pandas as pd
 import requests
 import streamlit as st
 import pycountry
+from bs4 import BeautifulSoup
 
 st.set_page_config(page_title="International Cost of Capital", page_icon="🌍", layout="wide")
 BETA_URL = "https://pages.stern.nyu.edu/~adamodar/pc/datasets/betas.xls"
@@ -70,24 +71,56 @@ def get_spread():
     raise ValueError('BBB large-firm spread could not be safely extracted; enter it manually')
 
 def get_te_yields():
-    html=fetch(TE_URL).text
-    tables=pd.read_html(io.StringIO(html),flavor="lxml")
-    result={}
-    for t in tables:
-        names=[str(c).lower() for c in t.columns]
-        country_col=next((i for i,c in enumerate(names) if 'country' in c or 'bond' in c),None)
-        yield_col=next((i for i,c in enumerate(names) if c in ('yield','last') or 'yield' in c),None)
-        if country_col is None or yield_col is None:continue
-        for _,row in t.iterrows():
-            name=normal_country(re.sub(r'\s+(10Y|10-Year|10 Year).*','',str(row.iloc[country_col]),flags=re.I).strip())
-            val=parse_num(row.iloc[yield_col])
-            if name and val is not None and -5<val<100:result[name]=val
-    if not result:raise ValueError('Trading Economics HTML did not expose a usable bond table')
+    """Read the assigned Trading Economics bonds webpage, without a second provider."""
+    html = fetch(TE_URL).text
+    soup = BeautifulSoup(html, 'lxml')
+    result = {}
+    # Trading Economics may supply table rows without a conventional <table>.
+    for tr in soup.select('tr'):
+        cells = [c.get_text(' ', strip=True) for c in tr.find_all(['td', 'th'], recursive=False)]
+        if len(cells) < 2:
+            continue
+        title = cells[0]
+        if not re.search(r'\b(10Y|10-Year|10 Year)\b', title, re.I):
+            continue
+        country = normal_country(re.sub(r'\s*(10Y|10-Year|10 Year).*$', '', title, flags=re.I))
+        # Yield/Last is usually the first numeric column after the bond name.
+        value = parse_num(cells[1])
+        if country and value is not None and -5 < value < 100:
+            result[country] = value
+    if result:
+        return result
+    # Fallback to HTML tables if the provider restores conventional markup.
+    try:
+        tables = pd.read_html(io.StringIO(html), flavor='lxml')
+    except (ValueError, ImportError):
+        tables = []
+    for table in tables:
+        columns = [str(c).lower() for c in table.columns]
+        name_idx = next((i for i, c in enumerate(columns) if 'country' in c or 'bond' in c), None)
+        yield_idx = next((i for i, c in enumerate(columns) if c in ('yield', 'last') or 'yield' in c), None)
+        if name_idx is None or yield_idx is None:
+            continue
+        for _, row in table.iterrows():
+            label = str(row.iloc[name_idx])
+            if not re.search(r'\b(10Y|10-Year|10 Year)\b', label, re.I):
+                continue
+            name = normal_country(re.sub(r'\s*(10Y|10-Year|10 Year).*$', '', label, flags=re.I))
+            value = parse_num(row.iloc[yield_idx])
+            if name and value is not None and -5 < value < 100:
+                result[name] = value
+    if not result:
+        raise ValueError('The assigned Trading Economics page did not provide accessible 10-year yield rows. Enter yields manually; no other data source was used')
     return result
 
 def get_oecd_taxes():
     """Use only the OECD report webpage assigned by the professor."""
-    html = fetch(OECD_URL.split("#")[0], timeout=30).text
+    try:
+        html = fetch(OECD_URL.split("#")[0], timeout=30).text
+    except requests.HTTPError as exc:
+        if exc.response is not None and exc.response.status_code == 403:
+            raise ValueError('OECD blocked automated access (HTTP 403). Enter the OECD rate manually or use the dated classroom reference; no alternate source was used') from exc
+        raise
     tables = pd.read_html(io.StringIO(html), flavor="lxml")
     result = {}
     for table in tables:
