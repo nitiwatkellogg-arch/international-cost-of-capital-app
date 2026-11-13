@@ -294,6 +294,7 @@ def get_te_yields():
             TE_URL,
             headers=HEADERS,
             timeout=30,
+            st.session_state["te_html"] = response.text
         )
 
         diagnostics["HTTP status"] = response.status_code
@@ -577,6 +578,13 @@ with st.expander(
     "🔍 Trading Economics connection diagnostic",
     expanded="yields" in errors,
 ):
+    if "te_html" in st.session_state:
+    st.download_button(
+        "Download Trading Economics HTML",
+        data=st.session_state["te_html"],
+        file_name="trading_economics.html",
+        mime="text/html",
+    )
     st.write(
         "This panel shows what Trading Economics "
         "returned to the Streamlit server."
