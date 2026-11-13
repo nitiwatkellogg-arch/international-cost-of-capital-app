@@ -12,7 +12,7 @@ import pycountry
 st.set_page_config(page_title="International Cost of Capital", page_icon="🌍", layout="wide")
 BETA_URL = "https://pages.stern.nyu.edu/~adamodar/pc/datasets/betas.xls"
 SPREAD_URL = "https://pages.stern.nyu.edu/adamodar/New_Home_Page/datafile/ratings.html"
-OECD_URL = "https://www.oecd.org/en/publications/corporate-tax-statistics-2024_9c27d6e8-en/full-report/statutory-corporate-income-tax-rates_440f9286.html"
+OECD_URL = "https://www.oecd.org/en/publications/corporate-tax-statistics-2024_9c27d6e8-en/full-report/statutory-corporate-income-tax-rates_440f9286.html#chapter-d1e2342-08e74a33fb"
 TE_URL = "https://tradingeconomics.com/bonds"
 HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; AcademicResearch/1.0)"}
 # Reference values are explicitly dated classroom examples, NEVER silently treated as current data.
@@ -51,7 +51,7 @@ def get_betas():
 
 def get_spread():
     html=fetch(SPREAD_URL).text
-    tables=pd.read_html(io.StringIO(html))
+    tables=pd.read_html(io.StringIO(html),flavor="lxml")
     for t in tables:
         for _,row in t.iterrows():
             cells=[str(v).strip() for v in row]
@@ -71,7 +71,7 @@ def get_spread():
 
 def get_te_yields():
     html=fetch(TE_URL).text
-    tables=pd.read_html(io.StringIO(html))
+    tables=pd.read_html(io.StringIO(html),flavor="lxml")
     result={}
     for t in tables:
         names=[str(c).lower() for c in t.columns]
@@ -86,20 +86,24 @@ def get_te_yields():
     return result
 
 def get_oecd_taxes():
-    # OECD's narrative publication may not contain the current full machine-readable country table.
-    # Only accept clearly identified country/rate columns; otherwise require user entry.
-    html=fetch(OECD_URL).text
-    tables=pd.read_html(io.StringIO(html))
-    result={}
-    for t in tables:
-        cols=[str(c).lower() for c in t.columns]
-        ci=next((i for i,c in enumerate(cols) if 'country' in c or 'jurisdiction' in c),None)
-        ri=next((i for i,c in enumerate(cols) if 'combined' in c and ('rate' in c or 'cit' in c)),None)
-        if ci is None or ri is None:continue
-        for _,row in t.iterrows():
-            name=normal_country(row.iloc[ci]);val=parse_num(row.iloc[ri])
-            if val is not None and 0<=val<=65:result[name]=val
-    if not result:raise ValueError('No current country-level combined statutory rate table detected on OECD publication page')
+    """Use only the OECD report webpage assigned by the professor."""
+    html = fetch(OECD_URL.split("#")[0], timeout=30).text
+    tables = pd.read_html(io.StringIO(html), flavor="lxml")
+    result = {}
+    for table in tables:
+        if table.shape[1] < 2:
+            continue
+        for _, row in table.iterrows():
+            cells = [str(v).strip() for v in row.tolist()]
+            for i, cell in enumerate(cells[:-1]):
+                country = normal_country(cell)
+                if country not in CLASS_TAX_2026:
+                    continue
+                value = parse_num(cells[i + 1])
+                if value is not None and 0 <= value <= 70:
+                    result[country] = value
+    if not result:
+        raise ValueError("OECD report did not expose a usable statutory-tax table. Use the manual input or dated classroom reference; no alternative source was used.")
     return result
 
 @st.cache_data(ttl=3600,show_spinner=False)
