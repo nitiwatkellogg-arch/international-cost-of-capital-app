@@ -1,5 +1,6 @@
 """International Cost of Capital | Kellogg International Finance."""
 import io
+from pathlib import Path
 import re
 from datetime import datetime, timezone
 from urllib.parse import urljoin
@@ -114,29 +115,30 @@ def get_te_yields():
     return result
 
 def get_oecd_taxes():
-    """Use only the OECD report webpage assigned by the professor."""
-    try:
-        html = fetch(OECD_URL.split("#")[0], timeout=30).text
-    except requests.HTTPError as exc:
-        if exc.response is not None and exc.response.status_code == 403:
-            raise ValueError('OECD blocked automated access (HTTP 403). Enter the OECD rate manually or use the dated classroom reference; no alternate source was used') from exc
-        raise
-    tables = pd.read_html(io.StringIO(html), flavor="lxml")
+    """Read the user-provided OECD 2024 Figure 2.1 Excel workbook (not live data)."""
+    path = Path(__file__).resolve().parent / "oecd_corporate_tax_2024.xlsx"
+    if not path.exists():
+        raise FileNotFoundError("Upload oecd_corporate_tax_2024.xlsx to the GitHub repository root")
+    raw = pd.read_excel(path, sheet_name="g2_1", header=None)
     result = {}
-    for table in tables:
-        if table.shape[1] < 2:
+    for code, value in raw.iloc[:, :2].itertuples(index=False, name=None):
+        if not isinstance(code, str) or not re.fullmatch(r"[A-Z]{3}", code):
             continue
-        for _, row in table.iterrows():
-            cells = [str(v).strip() for v in row.tolist()]
-            for i, cell in enumerate(cells[:-1]):
-                country = normal_country(cell)
-                if country not in CLASS_TAX_2026:
-                    continue
-                value = parse_num(cells[i + 1])
-                if value is not None and 0 <= value <= 70:
-                    result[country] = value
+        if not isinstance(value, (int, float, np.number)) or pd.isna(value):
+            continue
+        try:
+            country = pycountry.countries.get(alpha_3=code)
+            if country is None:
+                continue
+            name = normal_country(country.name)
+            name = {"Korea, Republic of": "South Korea", "Viet Nam": "Vietnam",
+                    "Türkiye": "Turkey", "Czechia": "Czech Republic",
+                    "United Arab Emirates": "United Arab Emirates"}.get(name, name)
+            result[name] = float(value) * 100  # OECD workbook stores rates as fractions
+        except (TypeError, ValueError):
+            continue
     if not result:
-        raise ValueError("OECD report did not expose a usable statutory-tax table. Use the manual input or dated classroom reference; no alternative source was used.")
+        raise ValueError("No ISO3 corporate tax rates found in the supplied OECD workbook")
     return result
 
 @st.cache_data(ttl=3600,show_spinner=False)
@@ -170,6 +172,7 @@ if st.button('🔄 Refresh all source data'):
     load_data.clear();st.rerun()
 with st.spinner('Retrieving public source data…'):
     data,errors,times=load_data()
+st.info('OECD statutory tax rates: uploaded OECD Corporate Tax Statistics 2024, Figure 2.1 (2024 observations). The refresh button rereads this bundled workbook; it does not download new OECD data. For newer rates, replace the workbook with an updated OECD file in the same layout.')
 for k,err in errors.items():st.warning(f'{k.title()} source unavailable: {err}. Enter a manual value or use the explicitly dated classroom reference where offered.')
 
 industries=data.get('betas',pd.DataFrame({'Industry':['Software (System & Application)'],'Unlevered beta':[np.nan]}))
@@ -264,8 +267,8 @@ st.download_button('⬇️ Download selected project (CSV)',comparison.to_csv(in
 
 st.subheader('Source transparency')
 source_rows=[]
-for key,source in [('betas',BETA_URL),('spread',SPREAD_URL),('taxes',OECD_URL),('yields',TE_URL)]:
+for key,source in [('betas',BETA_URL),('spread',SPREAD_URL),('taxes','OECD Corporate Tax Statistics 2024 — bundled Excel, Figure 2.1'),('yields',TE_URL)]:
     source_rows.append({'Dataset':key,'Source':source,'Retrieval (UTC)':times.get(key,'Unavailable'),'Status':'Fetched / parsed' if key in data else 'Unavailable — manual/reference required'})
 st.dataframe(pd.DataFrame(source_rows),hide_index=True,use_container_width=True)
-st.caption('Retrieval time is not the source observation date. Inspect the source for its published dataset date. Reference tax figures are from professor slides (OECD 2026); reference yields are from slides dated Nov 6, 2026. These references are not represented as live fetched data.')
+st.caption('Tax source observation year: 2024 (bundled OECD Excel). Retrieval time is not the source observation date. Inspect the source for its published dataset date. Reference tax figures are from professor slides (OECD 2026); reference yields are from slides dated Nov 6, 2026. These references are not represented as live fetched data.')
 if spread_result:st.caption('BBB parser note: '+spread_result[1])
