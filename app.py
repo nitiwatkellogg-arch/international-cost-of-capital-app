@@ -294,9 +294,9 @@ def get_te_yields():
             TE_URL,
             headers=HEADERS,
             timeout=30,
-            st.session_state["te_html"] = response.text
         )
-
+            st.session_state["te_html"] = response.text
+        
         diagnostics["HTTP status"] = response.status_code
         diagnostics["Final URL"] = response.url
         diagnostics["Response length"] = len(response.text)
